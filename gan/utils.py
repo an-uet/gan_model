@@ -57,7 +57,7 @@ class Utils:
                 new_gene_expression.append(row)
 
             except Exception as e:
-                print('error : ', e)
+                print('error : ', i,  e)
         gene_expression = np.array(new_gene_expression)
 
 

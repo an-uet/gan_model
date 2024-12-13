@@ -16,7 +16,7 @@ image_size = 256
 nc = 3
 
 # Size of z latent vector (i.e. size of generator input)
-nz = 2048
+nz = 1024
 
 # Size of feature maps in generator
 ngf = 64
@@ -25,7 +25,7 @@ ngf = 64
 ndf = 64
 
 # Number of training epochs
-num_epochs = 1000
+num_epochs = 2000
 
 # Learning rate for optimizers
 lr_d = 0.0002
@@ -45,22 +45,22 @@ real_label = 0.9
 
 fake_label = 0.0
 
-noise_scale = 0.2
+noise_scale = 0.3
 
-# additinal parameters for wgan
+# additional parameters for wgan
 n_critic = 5
 
-#
 alpha = 0.3
 
 clip_value = 0.01
 
+# additional parameters for wgan-gp
 lambda_gp = 10
 
 dataroot_train = 'data/image/spots_train'
 dataroot_test = 'data/image/spots_test'
-gene_expression_data = 'data/gene_expression/data_train.csv'
-gene_expression_test = 'data/gene_expression/data_test.csv'
-gene_expression_validation = 'data/gene_expression/data_validation.csv'
+gene_expression_data = 'data/gene_expression/top_1024/data_train.csv'
+gene_expression_test = 'data/gene_expression/top_1024/data_test.csv'
+gene_expression_validation = 'data/gene_expression/top_1024/data_validation.csv'
 random_indices = [483, 38, 355, 494, 393, 108, 193, 209, 358, 213, 280, 380, 162, 306, 347, 398, 110, 123, 141, 156,
                   324, 1, 59, 51, 130, 131, 5, 299, 319, 352, 64, 256]

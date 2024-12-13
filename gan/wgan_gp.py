@@ -1,4 +1,3 @@
-# Wgan-div implementation from paper: https://arxiv.org/pdf/1701.07875
 import logging
 import os
 from collections import OrderedDict
@@ -22,25 +21,119 @@ from gan.model_config import gene_expression_data, noise_scale, batch_size, nz, 
     nc, lr_g, lr_d, beta1, num_epochs, log_interval, n_critic, image_size, ngpu, lambda_gp
 from gan.utils import Utils
 
+if not os.path.exists('result'):
+    os.makedirs('result')
 
 # Configure logging
 logging.basicConfig(filename='result/training.log', level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-img_shape = (nc, image_size, image_size)
 
-k = 2
-p = 4
+class Generator(nn.Module):
+    def __init__(self, ngpu):
+        super(Generator, self).__init__()
+        self.ngpu = ngpu
+        self.model = nn.Sequential(
+            nn.ConvTranspose2d(nz, 1024, kernel_size=4, stride=2, padding=0),  # 1x1 -> 4x4
+            nn.BatchNorm2d(1024),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(1024, 512, kernel_size=4, stride=2, padding=1),  # 4x4 -> 8x8
+            nn.BatchNorm2d(512),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),  # 8x8 -> 16x16
+            nn.BatchNorm2d(256),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # 16x16 -> 32x32
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),  # 32x32 -> 64x64
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),  # 64x64 -> 128x128
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(32, nc, kernel_size=4, stride=2, padding=1),  # 128x128 -> 256x256
+            nn.Tanh()
+        )
+
+    def forward(self, z):
+        z = z.view(z.size(0), nz, 1, 1)
+        img = self.model(z)
+        return img
 
 
+class Discriminator(nn.Module):
+    def __init__(self, ngpu):
+        super(Discriminator, self).__init__()
+        self.ngpu = ngpu
+        self.model = nn.Sequential(
+            # Input: nc x 256 x 256
+            nn.utils.spectral_norm( nn.Conv2d(nc, 32, kernel_size=4, stride=2, padding=1)),  # 256x256 -> 128x128
+            # nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.2, inplace=True),
 
+            nn.utils.spectral_norm(nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1)),  # 128x128 -> 64x64
+            # nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.utils.spectral_norm(nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)),  # 64x64 -> 32x32
+            # nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.utils.spectral_norm(nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1)),  # 32x32 -> 16x16
+            # nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.utils.spectral_norm(nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1)),  # 16x16 -> 8x8
+            # nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.utils.spectral_norm(nn.Conv2d(512, 1024, kernel_size=4, stride=2, padding=1)),  # 8x8 -> 4x4
+            # nn.BatchNorm2d(1024),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Flatten(),
+            nn.Linear(1024 * 4 * 4, 1)
+        )
+
+    def forward(self, img):
+        return self.model(img).view(-1, 1)
+
+
+def compute_gradient_penalty(D, real_samples, fake_samples):
+    """Calculates the gradient penalty loss for WGAN GP"""
+    # Random weight term for interpolation between real and fake samples
+    alpha = Tensor(np.random.random((real_samples.size(0), 1, 1, 1)))
+    # Get random interpolation between real and fake samples
+    interpolates = (alpha * real_samples + ((1 - alpha) * fake_samples)).requires_grad_(True)
+    d_interpolates = D(interpolates)
+    fake = Variable(Tensor(real_samples.shape[0], 1).fill_(1.0), requires_grad=False)
+    # Get gradient w.r.t. interpolates
+    gradients = autograd.grad(
+        outputs=d_interpolates,
+        inputs=interpolates,
+        grad_outputs=fake,
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+    )[0]
+    gradients = gradients.view(gradients.size(0), -1)
+    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+    return gradient_penalty
 
 def run():
     losses_d = []
     losses_g = []
-    real_grad_arr = []
-    fake_grad_arr = []
+    log_gloss = []
+    gp_arr = []
     best_g_loss = float('inf')
+
     cuda = True if torch.cuda.is_available() else False
     device = torch.device("cuda" if cuda else "cpu")
     Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
@@ -131,17 +224,25 @@ def run():
                     "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f] [gradient penalty: %f]"
                     % (epoch, num_epochs, i, len(dataloader), d_loss.item(), g_loss.item(), gradient_penalty.item())
                 )
+                print("[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f] [gradient penalty: %f]"
+                       % (epoch, num_epochs, i, len(dataloader), d_loss.item(), g_loss.item(), gradient_penalty.item()))
+
                 losses_d.append(d_loss.item())
                 losses_g.append(g_loss.item())
+                gp_arr.append(gradient_penalty.item())
+
                 Utils.plot_losses(losses_d, losses_g, 'result/generated_image/losses.png')
+                Utils.plot_losses(gp_arr, losses_g, 'result/generated_image/gradient_penalty.png')
                 batches_done += n_critic
 
-                if g_loss.item() < best_g_loss:
+                if g_loss.item() <= best_g_loss and epoch >= 300:
                     best_g_loss = g_loss.item()
+                    log_gloss.append((epoch, i, best_g_loss))
                     torch.save(generator.state_dict(), 'result/model/best_generator.pth')
-                    logging.info(f"Best model saved with G loss: {best_g_loss}")
+                    print(f"Best model saved with G loss: {best_g_loss} at epoch {epoch}")
+                    logging.info(f"Best model saved with G loss: {best_g_loss} at epoch {epoch}")
 
-        if epoch % 2 == 0 and (i == len(dataloader) - 1):
+        if epoch == 1 or epoch % 20 == 0:
             fake_imgs_fixed = generator(fixed_noise.view(fixed_noise.size(0), -1))
             stacked_images = torch.stack((real_imgs_fixed[:32], fake_imgs_fixed[:32]), dim=1)
             mixed_images = stacked_images.view(-1, *real_imgs_fixed.shape[1:])
@@ -150,15 +251,17 @@ def run():
             save_image(grid, f"result/generated_image/{epoch}.png", nrow=5, normalize=True)
             # wandb.log({"Generated Images": wandb.Image(grid, caption="Epoch %d" % epoch)})
 
-
-        if epoch % 50 == 0 and epoch >= 300:
+        if epoch % 50 == 0 and epoch >= 400:
             torch.save(generator.state_dict(), f"result/model/model_epoch_{epoch}.h5")
 
     data_loss = []
-    for loss_d, loss_g, real_grad, fake_grad in zip(losses_d, losses_g, real_grad_arr, fake_grad_arr):
-        data_loss.append((loss_d, loss_g, real_grad, fake_grad))
-    data_loss = pd.DataFrame(data_loss, columns=['loss_d', 'loss_g', 'real_grad', 'fake_grad'])
+    for loss_d, loss_g, gp in zip(losses_d, losses_g, gp_arr):
+        data_loss.append((loss_d, loss_g, gp))
+    data_loss = pd.DataFrame(data_loss, columns=['loss_d', 'loss_g', 'gp_arr'])
     data_loss.to_csv('result/model/losses.csv')
+
+    log_gloss = pd.DataFrame(log_gloss, columns=['epoch', 'batch', 'g_loss'])
+    log_gloss.to_csv('result/model/log_gloss.csv')
 
 
 def predict_image(model_path, gene_expression):
@@ -189,9 +292,9 @@ def predict_image(model_path, gene_expression):
     min_noise, max_noise = random_noise.min(), random_noise.max()
     scaled_noise = 2 * (random_noise - min_noise) / (max_noise - min_noise) - 1
     scaled_noise = scaled_noise.to(device)
-    noise = noise + 0 * scaled_noise
+    noise = noise + 0.3 * scaled_noise
 
-    full_image = [f'/home/anlt69/Downloads/GAN_model_13Nov2024/gan_model/data/image_1/spots_validation/validation/{i}.jpg' for i in range(500)]
+    full_image = [f'data/image/spots_validation/validation/{i}.jpg' for i in range(500)]
 
     full_image_tensors = []
     for img_path in full_image:
@@ -209,61 +312,7 @@ def predict_image(model_path, gene_expression):
 
         # Concatenate real and fake images
         concat_img = np.concatenate((real_img_np, fake_img_np), axis=1)
-        concat_img = fake_img_np
-        plt.imsave(f'result/validation/image_{i}.jpg', concat_img)
+        plt.imsave(f'result/validation/image_{i}.jpg', fake_img_np)
+        plt.imsave(f'result/validation/concat_image_{i}.jpg', concat_img)
 
-
-
-def load_model(model_path, ngpu):
-    netG = Generator(ngpu)
-    state_dict = torch.load(model_path, map_location=torch.device('cpu'))
-
-    # Remove 'module.' prefix if present
-    new_state_dict = OrderedDict()
-    for k, v in state_dict.items():
-        if k.startswith('module.'):
-            new_state_dict[k[7:]] = v
-        else:
-            new_state_dict[k] = v
-
-    netG.load_state_dict(new_state_dict)
-    return netG
-
-def predict_and_concat(models, gene_expression, real_image_path, device, noise_scale, nz):
-    # Load real image
-    real_img = Image.open(real_image_path)
-    real_img_tensor = ToTensor()(real_img).to(device)
-
-    # Prepare gene expression noise
-    noise = np.array(gene_expression)
-    noise = torch.tensor(noise, dtype=torch.float32)
-    if noise.dim() == 1:
-        noise = noise.unsqueeze(0)
-    noise = torch.tensor(noise, dtype=torch.float32).unsqueeze(2).unsqueeze(3).to(device)
-
-    # Generate random noise
-    random_noise = torch.randn(1, nz, 1, 1, device=device)
-    min_noise, max_noise = random_noise.min(), random_noise.max()
-    scaled_noise = 2 * (random_noise - min_noise) / (max_noise - min_noise) - 1
-    scaled_noise = scaled_noise.to(device)
-    # noise = noise + noise_scale * scaled_noise
-
-    real_img_np = real_img_tensor.permute(1, 2, 0).cpu().numpy()
-    list_fake = []
-    # Predict fake images and concatenate with real image
-    for i, model_path in enumerate(models):
-        netG = load_model(model_path, ngpu)
-        netG.to(device)
-        netG.eval()
-
-        with torch.no_grad():
-            fake_img = netG(noise).detach().cpu().squeeze(0)
-            fake_img = (fake_img + 1) / 2.0  # Rescale to [0, 1]
-            fake_img_np = fake_img.permute(1, 2, 0).numpy()
-
-
-            # Concatenate real and fake images
-            list_fake.append(fake_img_np)
-    concat_img = np.concatenate([real_img_np] + list_fake, axis=1)
-    plt.imsave(f'result/concat_image.jpg', concat_img)
 
